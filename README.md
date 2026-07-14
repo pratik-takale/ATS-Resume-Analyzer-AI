@@ -85,7 +85,7 @@ The landing page where users can access the ATS Resume Analyzer and explore its 
 
 Upload a PDF resume and optionally provide a Job Description for ATS analysis.
 
-![Resume Upload](screenshots/upload_resume.png)
+![Resume Upload](screenshot/upload_resume.png)
 
 ---
 
