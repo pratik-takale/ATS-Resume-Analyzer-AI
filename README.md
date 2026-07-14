@@ -93,7 +93,7 @@ Upload a PDF resume and optionally provide a Job Description for ATS analysis.
 
 Compare the uploaded resume against a target Job Description to evaluate compatibility.
 
-![JD Matching](screenshots/matching.png)
+![JD Matching](screenshot/matching.png)
 
 ---
 
@@ -101,7 +101,7 @@ Compare the uploaded resume against a target Job Description to evaluate compati
 
 Overall ATS compatibility score generated after AI-based analysis.
 
-![ATS Score](screenshots/ats_score.png)
+![ATS Score](screenshot/ats.png)
 
 
 ---
@@ -110,7 +110,7 @@ Overall ATS compatibility score generated after AI-based analysis.
 
 View previous resume analyses stored securely in Supabase.
 
-![History](screenshots/history.png)
+![History](screenshot/history.png)
 ## Project Architecture
 
 ```
