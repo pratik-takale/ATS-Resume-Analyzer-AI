@@ -7,7 +7,15 @@ from typing import Dict, List, Optional, Tuple
 from backend.utils.file_utils import log_warning
 from backend.core.config import SENTENCE_TRANSFORMER_MODEL
 from backend.utils.matching import fuzzy_match_keywords
-
+import re
+def normalize_text(text: str) -> str:
+    text = text.lower()
+    text = text.replace("-", "")
+    text = text.replace("_", "")
+    text = text.replace("/", "")
+    text = text.replace(" ", "")
+    text = re.sub(r"[^a-z0-9]", "", text)
+    return text
 ZIP_CODE_PATTERN = r'\b\d{5}(?:-\d{4})?\b'
 
 STREET_ADDRESS_PATTERN = (
@@ -89,17 +97,30 @@ def _calculate_semantic_similarity(skill: str, text: str, embedder: SentenceTran
         log_warning(f"Similarity error for '{skill}': {e}", context='ats_scorer')
         return 0.0
 
-def _skill_matches(skill: str, text: str, embedder: SentenceTransformer, threshold: float) -> Tuple[bool, float]:
+def _skill_matches(
+    skill: str,
+    text: str,
+    embedder: SentenceTransformer,
+    threshold: float = 0.45,
+) -> Tuple[bool, float]:
 
-    #fast, o(n) directly check if skill is a substring of the text (case-insensitive)
-    if skill.lower() in text.lower():
+    skill_norm = re.sub(r"[^a-z0-9]", "", skill.lower())
+    text_norm = re.sub(r"[^a-z0-9]", "", text.lower())
+
+    # Exact match
+    if skill_norm in text_norm:
         return True, 1.0
-    
-    #slow, semantic similarity check using sentence embeddings
-    sim = _calculate_semantic_similarity(skill, text, embedder)
-    return sim >= threshold, sim
 
-#Skill validation
+    # Word match
+    for word in text.lower().split():
+        word_norm = re.sub(r"[^a-z0-9]", "", word)
+        if word_norm == skill_norm:
+            return True, 1.0
+
+    # Semantic similarity
+    sim = _calculate_semantic_similarity(skill, text, embedder)
+
+    return sim >= threshold, sim
 def validate_skills_with_projects(
     skills: List[str],
     projects: List[Dict],
@@ -107,62 +128,199 @@ def validate_skills_with_projects(
     embedder: SentenceTransformer,
     threshold: float = 0.6,
 ) -> Dict:
-    
+
     if not skills:
         return {
-            'validated_skills':      [],
-            'unvalidated_skills':    [],
-            'validation_percentage': 0.0,
-            'skill_project_mapping': {},
-            'validation_score':      0.0,
+            "validated_skills": [],
+            "unvalidated_skills": [],
+            "validation_percentage": 0.0,
+            "skill_project_mapping": {},
+            "validation_score": 0.0,
         }
 
-    experience_text = ' '.join(
-        f"{e.get('job_title', '')} {e.get('company', '')} {e.get('description', '')}"
+    # Build experience text
+    experience_text = " ".join(
+        f"{e.get('job_title','')} {e.get('company','')} {e.get('description','')}"
         for e in experience_entries
         if isinstance(e, dict)
-    ).strip()
+    )
 
-    validated_skills      = []
-    unvalidated_skills    = []
+    experience_normalized = normalize_text(experience_text)
+
+    # Preprocess project texts once
+    processed_projects = []
+
+    for project in projects:
+        text = f"{project.get('title','')} {project.get('description','')}"
+        processed_projects.append({
+            "title": project.get("title", "Untitled Project"),
+            "text": text,
+            "normalized": normalize_text(text)
+        })
+
+    validated_skills = []
+    unvalidated_skills = []
     skill_project_mapping = {}
+    print("=" * 60)
+    print("Extracted Skills:")
+    print(skills)
+
+    print("=" * 60)
+    print("Projects:")
+    print(projects)
+
+    print("=" * 60)
+    print("Experience:")
+    print(experience_entries)
 
     for skill in skills:
+
+        normalized_skill = normalize_text(skill)
+
         matching_projects = []
-        max_similarity    = 0.0
+        max_similarity = 0.0
+        validated = False
 
-        for project in projects:
-            project_text = f"{project.get('title', '')} {project.get('description', '')}"
-            matched, sim = _skill_matches(skill, project_text, embedder, threshold)
-            max_similarity = max(max_similarity, sim)
+        # --------------------------------------------------
+        # STEP 1 : Exact Match (Fast)
+        # --------------------------------------------------
+        for project in processed_projects:
 
-            if matched:
-                matching_projects.append(project.get('title', 'Untitled Project'))
+            if normalized_skill in project["normalized"]:
+                matching_projects.append(project["title"])
+                max_similarity = 1.0
+                validated = True
 
-        if experience_text:
-            matched, sim = _skill_matches(skill, experience_text, embedder, threshold)
-            max_similarity = max(max_similarity, sim)
-            if matched and 'Experience Section' not in matching_projects:
-                matching_projects.append('Experience Section')
+        if normalized_skill in experience_normalized:
 
-        if matching_projects:
-            validated_skills.append({'skill': skill, 'projects': matching_projects, 'similarity': max_similarity})
+            if "Experience Section" not in matching_projects:
+                matching_projects.append("Experience Section")
+
+            max_similarity = max(max_similarity, 1.0)
+            validated = True
+
+        # --------------------------------------------------
+        # STEP 2 : Semantic Match (Fallback)
+        # --------------------------------------------------
+        if not validated:
+
+            for project in processed_projects:
+
+                matched, similarity = _skill_matches(
+                    skill,
+                    project["text"],
+                    embedder,
+                    threshold,
+                )
+
+                max_similarity = max(max_similarity, similarity)
+
+                if matched:
+                    validated = True
+
+                    if project["title"] not in matching_projects:
+                        matching_projects.append(project["title"])
+
+            if experience_text:
+
+                matched, similarity = _skill_matches(
+                    skill,
+                    experience_text,
+                    embedder,
+                    threshold,
+                )
+
+                max_similarity = max(max_similarity, similarity)
+
+                if matched:
+
+                    validated = True
+
+                    if "Experience Section" not in matching_projects:
+                        matching_projects.append("Experience Section")
+
+        # --------------------------------------------------
+        # Save Results
+        # --------------------------------------------------
+        if validated:
+
+            validated_skills.append({
+                "skill": skill,
+                "projects": matching_projects,
+                "similarity": round(max_similarity, 3),
+            })
+
             skill_project_mapping[skill] = matching_projects
+
         else:
+
             unvalidated_skills.append(skill)
             skill_project_mapping[skill] = []
 
-    validation_percentage = len(validated_skills) / len(skills)
-    validation_score      = validation_percentage * 15.0
+    validation_percentage = (
+        len(validated_skills) / len(skills)
+        if skills else 0
+    )
 
+    # Better scoring
+    if validation_percentage >= 0.90:
+        validation_score = 15
+
+    elif validation_percentage >= 0.80:
+        validation_score = 13
+
+    elif validation_percentage >= 0.70:
+        validation_score = 11
+
+    elif validation_percentage >= 0.60:
+        validation_score = 9
+
+    elif validation_percentage >= 0.50:
+        validation_score = 7
+
+    elif validation_percentage >= 0.40:
+        validation_score = 5
+
+    elif validation_percentage >= 0.30:
+        validation_score = 3
+
+    else:
+        validation_score = 1
+    print("="*50)
+    print("Validated Skills")
+    print(len(validated_skills))
+    print(validated_skills)
+
+    print("="*50)
+    print("Unvalidated Skills")
+    print(len(unvalidated_skills))
+    print(unvalidated_skills)
+
+    print("="*50)
+    print(validation_percentage)
+    print(validation_score)
+    print("\n========== SKILL VALIDATION DEBUG ==========")
+    print(f"Total Skills: {len(skills)}")
+    print(f"Validated Skills: {len(validated_skills)}")
+    print(f"Validation Percentage: {validation_percentage}")
+    print(f"Validation Score: {validation_score}")
+
+    print("\nValidated:")
+    for s in validated_skills:
+        print(s)
+
+    print("\nUnvalidated:")
+    for s in unvalidated_skills:
+        print(s)
+
+    print("============================================\n")
     return {
-        'validated_skills':      validated_skills,
-        'unvalidated_skills':    unvalidated_skills,
-        'validation_percentage': validation_percentage,
-        'skill_project_mapping': skill_project_mapping,
-        'validation_score':      validation_score,
+        "validated_skills": validated_skills,
+        "unvalidated_skills": unvalidated_skills,
+        "validation_percentage": round(validation_percentage, 2),
+        "skill_project_mapping": skill_project_mapping,
+        "validation_score": validation_score,
     }
-
 #01: formatting score
 def _calc_formatting_score(parsed_resume: Dict, text: str) -> float:
 
@@ -205,22 +363,46 @@ def _calc_keywords_score(
     skills: List[str],
     jd_keywords: Optional[List[str]] = None,
 ) -> float:
-    score = 0.0
 
-    score += _tier_score(len(resume_keywords), [(20,10.0),(15,8.0),(10,6.0),(5,4.0),(3,2.0)])
-    score += _tier_score(len(skills),          [(15,10.0),(10,8.0),(7,6.0),(5,4.0),(3,2.0)])
+    all_resume_terms = list(set(
+        [x.strip().lower() for x in (resume_keywords + skills) if x.strip()]
+    ))
 
-    if jd_keywords:
-        all_resume_terms = list(set(resume_keywords + skills))
-        fuzzy_result     = fuzzy_match_keywords(all_resume_terms, jd_keywords, threshold=80)
-        match_pct        = len(fuzzy_result['matched']) / len(jd_keywords) if jd_keywords else 0
-        score += _tier_score(match_pct, [(0.7,5.0),(0.5,4.0),(0.3,3.0),(0.2,2.0),(0.1,1.0)])
-    
-    elif len(resume_keywords) >= 10:
-        score += 3.0
+    if not jd_keywords:
+        # No JD → evaluate resume richness only.
+        # NOTE: rescaled to the same 0-25 max as the JD-match branch below.
+        # (Previously this topped out at 20.0 while calculate_overall_score()
+        # always divided by 25.0, so a no-JD resume could never score above
+        # 80% on this dimension no matter how strong it was.)
+        unique_terms = len(all_resume_terms)
 
-    return min(25.0, max(0.0, score))
+        if unique_terms >= 25:
+            return 25.0
+        elif unique_terms >= 20:
+            return 21.3
+        elif unique_terms >= 15:
+            return 17.5
+        elif unique_terms >= 10:
+            return 12.5
+        else:
+            return 7.5
 
+    jd_terms = list(set(
+        [x.strip().lower() for x in jd_keywords if x.strip()]
+    ))
+
+    fuzzy_result = fuzzy_match_keywords(
+        all_resume_terms,
+        jd_terms,
+        threshold=75,
+    )
+
+    matched = len(fuzzy_result["matched"])
+    total = len(jd_terms)
+
+    match_percentage = matched / total if total else 0
+
+    return round(match_percentage * 25, 1)
 #3. CONTENT QUALITY SCORE
 def _calc_content_score(
     text: str,
@@ -260,7 +442,7 @@ def _calc_ats_compatibility_score(
 
     score = 15.0
 
-    #dedeuction01
+    #deduction01
     score -= location_results.get('penalty_applied', 0.0)
 
     #deduction02
@@ -303,82 +485,233 @@ def calculate_overall_score(
     experience_months: int = 0,
 ) -> Dict:
 
-    formatting_score        = _calc_formatting_score(parsed_resume, text)
-    keywords_score          = _calc_keywords_score(keywords, skills, jd_keywords)
-    content_score           = _calc_content_score(text, action_verbs, grammar_results)
-    skill_validation_score  = _calc_skill_validation_score(skill_validation_results)
-    ats_compatibility_score = _calc_ats_compatibility_score(text, location_results, parsed_resume)
+    # ----------------------------
+    # Individual Component Scores
+    # ----------------------------
 
-    COMPONENT_MAX = {
-        'formatting': 20.0, 'keywords': 25.0, 'content': 25.0,
-        'skill_validation': 15.0, 'ats_compatibility': 15.0,
-    }
+    formatting_score = _calc_formatting_score(parsed_resume, text)
+    keywords_score = _calc_keywords_score(keywords, skills, jd_keywords)
+    content_score = _calc_content_score(text, action_verbs, grammar_results)
+    skill_validation_score = _calc_skill_validation_score(
+        skill_validation_results
+    )
+    ats_compatibility_score = _calc_ats_compatibility_score(
+        text,
+        location_results,
+        parsed_resume,
+    )
 
-    formatting_pct        = (formatting_score        / COMPONENT_MAX['formatting'])        * 100.0
-    keywords_pct          = (keywords_score          / COMPONENT_MAX['keywords'])          * 100.0
-    content_pct           = (content_score           / COMPONENT_MAX['content'])           * 100.0
-    skill_validation_pct  = (skill_validation_score  / COMPONENT_MAX['skill_validation'])  * 100.0
-    ats_compatibility_pct = (ats_compatibility_score / COMPONENT_MAX['ats_compatibility']) * 100.0
+    # ----------------------------
+    # Convert to Percentages
+    # ----------------------------
 
-    skills_keywords_pct = (keywords_pct * 0.6) + (skill_validation_pct * 0.4)
+    formatting_pct = (formatting_score / 20.0) * 100
+    keyword_pct = (keywords_score / 25.0) * 100
+    content_pct = (content_score / 25.0) * 100
+    validation_pct = (skill_validation_score / 15.0) * 100
+    ats_pct = (ats_compatibility_score / 15.0) * 100
 
-    base_score = (
-        skills_keywords_pct   * 0.40 +
-        content_pct           * 0.30 +
-        formatting_pct        * 0.15 +
-        ats_compatibility_pct * 0.15
+    # ----------------------------
+    # ATS Weight Distribution
+    # ----------------------------
+
+    score = (
+        keyword_pct * 0.35 +
+        validation_pct * 0.20 +
+        content_pct * 0.20 +
+        formatting_pct * 0.10 +
+        ats_pct * 0.10
     )
 
     penalties = {}
-    bonuses   = {}
-    score     = base_score
+    bonuses = {}
+        # ----------------------------
+    # Grammar Penalty
+    # ----------------------------
 
-    if grammar_results.get('penalty_applied', 0.0) > 0:
-        penalties['grammar'] = grammar_results['penalty_applied']
+    grammar_penalty = grammar_results.get("penalty_applied", 0.0)
 
-    if location_results.get('penalty_applied', 0.0) > 0:
-        penalties['location_privacy'] = location_results['penalty_applied']
+    if grammar_penalty > 0:
+        # NOTE: not subtracted again here — grammar_penalty is already
+        # baked into content_score (via _calc_content_score, which does
+        # 10.0 - grammar_penalty/2.0). Subtracting it again here was a
+        # double-penalty bug. Recorded below for reporting/transparency only.
+        penalties["grammar"] = grammar_penalty
 
-    validation_pct = skill_validation_results.get('validation_percentage', 0.0)
-    if validation_pct >= 0.9:
-        bonuses['excellent_skill_validation'] = 2.0
+    # ----------------------------
+    # Location Privacy Penalty
+    # ----------------------------
+
+    location_penalty = location_results.get("penalty_applied", 0.0)
+
+    if location_penalty > 0:
+        # NOTE: not subtracted again here — location_penalty is already
+        # baked into ats_compatibility_score (via _calc_ats_compatibility_score).
+        # Subtracting it again here was a double-penalty bug. Recorded below
+        # for reporting/transparency only.
+        penalties["location_privacy"] = location_penalty
+
+    # ----------------------------
+    # Skill Validation Bonus
+    # ----------------------------
+
+    validation_ratio = skill_validation_results.get(
+        "validation_percentage", 0.0
+    )
+
+    if validation_ratio >= 0.90:
+        bonuses["excellent_skill_validation"] = 3.0
+        score += 3.0
+
+    elif validation_ratio >= 0.75:
+        bonuses["good_skill_validation"] = 2.0
         score += 2.0
-    elif validation_pct >= 0.8:
-        bonuses['good_skill_validation'] = 1.0
+
+    elif validation_ratio >= 0.60:
+        bonuses["average_skill_validation"] = 1.0
         score += 1.0
 
-    if grammar_results.get('total_errors', 0) == 0:
-        bonuses['perfect_grammar'] = 1.0
+    # ----------------------------
+    # Perfect Grammar Bonus
+    # ----------------------------
+
+    if grammar_results.get("total_errors", 0) == 0:
+        bonuses["perfect_grammar"] = 2.0
+        score += 2.0
+
+    # ----------------------------
+    # Project Bonus
+    # ----------------------------
+
+    projects = parsed_resume.get("projects", [])
+
+    if len(projects) >= 3:
+        bonuses["excellent_projects"] = 3.0
+        score += 3.0
+
+    elif len(projects) == 2:
+        bonuses["good_projects"] = 2.0
+        score += 2.0
+
+    elif len(projects) == 1:
+        bonuses["one_project"] = 1.0
         score += 1.0
 
-    if jd_keywords and len(jd_keywords) > 0:
-        all_resume_terms = list(set((keywords or []) + (skills or [])))
-        fuzzy_result     = fuzzy_match_keywords(all_resume_terms, jd_keywords, threshold=80)
-        missing_pct      = len(fuzzy_result['missing']) / len(jd_keywords)
+    # ----------------------------
+    # Experience Bonus
+    # ----------------------------
 
-        if missing_pct > 0.7:
-            penalties['missing_jd_keywords'] = 15.0
-            score -= 15.0
-        elif missing_pct > 0.5:
-            penalties['missing_jd_keywords'] = 10.0
-            score -= 10.0
-        elif missing_pct > 0.3:
-            penalties['missing_jd_keywords'] = 5.0
-            score -= 5.0
+    if experience_months >= 24:
+        bonuses["experience"] = 3.0
+        score += 3.0
 
-    overall_score = min(100.0, max(0.0, score))
-    interpretation = _generate_score_interpretation(overall_score)
+    elif experience_months >= 12:
+        bonuses["experience"] = 2.0
+        score += 2.0
 
+    elif experience_months >= 6:
+        bonuses["experience"] = 1.0
+        score += 1.0
+
+    # ----------------------------
+    # JD Match Bonus
+    # ----------------------------
+
+    if jd_keywords:
+
+        resume_terms = list(
+            set(
+                [
+                    x.lower().strip()
+                    for x in (keywords + skills)
+                    if x
+                ]
+            )
+        )
+
+        jd_terms = list(
+            set(
+                [
+                    x.lower().strip()
+                    for x in jd_keywords
+                    if x
+                ]
+            )
+        )
+
+        fuzzy = fuzzy_match_keywords(
+            resume_terms,
+            jd_terms,
+            threshold=75,
+        )
+
+        match_pct = (
+            len(fuzzy["matched"]) / len(jd_terms)
+            if jd_terms
+            else 0
+        )
+
+        if match_pct >= 0.90:
+            bonuses["excellent_jd_match"] = 5.0
+            score += 5.0
+
+        elif match_pct >= 0.80:
+            bonuses["good_jd_match"] = 4.0
+            score += 4.0
+
+        elif match_pct >= 0.70:
+            bonuses["average_jd_match"] = 3.0
+            score += 3.0
+
+        elif match_pct >= 0.60:
+            bonuses["basic_jd_match"] = 2.0
+            score += 2.0
+
+        elif match_pct >= 0.50:
+            bonuses["minimum_jd_match"] = 1.0
+            score += 1.0
+
+    # ----------------------------
+    # Normalize Score
+    # ----------------------------
+
+    overall_score = round(
+        max(0.0, min(score, 100.0)),
+        1,
+    )
+
+    interpretation = _generate_score_interpretation(
+        overall_score
+    )
+
+    # ----------------------------
+    # Return full result
+    # ----------------------------
+    # BUG FIX: this function previously computed overall_score/interpretation
+    # but never returned anything, so every caller (generate_strengths,
+    # generate_critical_issues, generate_improvements) received None and
+    # crashed with TypeError: 'NoneType' object is not subscriptable when
+    # they tried score_results['formatting_score'] etc. Returning the full
+    # breakdown below fixes it.
     return {
-        'overall_score':           round(overall_score, 1),
-        'formatting_score':        round(formatting_score, 1),
-        'keywords_score':          round(keywords_score, 1),
-        'content_score':           round(content_score, 1),
-        'skill_validation_score':  round(skill_validation_score, 1),
+        'overall_score':          overall_score,
+        'interpretation':         interpretation,
+        'formatting_score':       round(formatting_score, 1),
+        'keywords_score':         round(keywords_score, 1),
+        'content_score':          round(content_score, 1),
+        'skill_validation_score': round(skill_validation_score, 1),
         'ats_compatibility_score': round(ats_compatibility_score, 1),
-        'overall_interpretation':  interpretation,
-        'penalties':               penalties,
-        'bonuses':                 bonuses,}
+        'component_percentages': {
+            'formatting_pct': round(formatting_pct, 1),
+            'keyword_pct':    round(keyword_pct, 1),
+            'content_pct':    round(content_pct, 1),
+            'validation_pct': round(validation_pct, 1),
+            'ats_pct':        round(ats_pct, 1),
+        },
+        'penalties': penalties,
+        'bonuses':   bonuses,
+    }
+
 
 #Overall score calculation and interpretation
 def generate_strengths(
