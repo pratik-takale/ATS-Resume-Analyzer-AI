@@ -14,12 +14,12 @@ def _show_backend_error(exc: Exception) -> None:
 
 
 def render() -> None:
-    st.title("📊 Analysis History")
+    st.title(" Analysis History")
     st.markdown("Past analyses saved against your account.")
 
     access_token = st.session_state.get("access_token")
     if not access_token:
-        st.warning("⚠️ Sign in from the sidebar to view your history.")
+        st.warning(" Sign in from the sidebar to view your history.")
         return
 
     try:
@@ -47,7 +47,7 @@ def render() -> None:
         component_scores = analysis.get("component_scores", {}) or {}
         jd_comparison = analysis.get("jd_comparison") or analysis.get("jd_match_analysis")
 
-        with st.expander(f"📄 {filename} — Score: {ats_score:.0f}/100 — {created_at}"):
+        with st.expander(f" {filename} — Score: {ats_score:.0f}/100 — {created_at}"):
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.metric("Overall", f"{ats_score:.0f}/100")
@@ -64,7 +64,7 @@ def render() -> None:
 
             entry_id = entry.get("id")
             if entry_id:
-                if st.button("🗑️ Delete", key=f"delete_{idx}"):
+                if st.button(" Delete", key=f"delete_{idx}"):
                     try:
                         api_client.delete_history_entry(str(entry_id), access_token)
                         st.success("Deleted.")
