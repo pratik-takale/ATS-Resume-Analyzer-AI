@@ -77,23 +77,7 @@ The system combines resume parsing, semantic search, keyword matching, and AI-po
 
 The landing page where users can access the ATS Resume Analyzer and explore its features.
 
-![Home Page](screenshots/home.png)
-
----
-
-### Login Page
-
-Secure user authentication using Clerk.
-
-![Login](screenshots/login.png)
-
----
-
-### Register Page
-
-New users can create an account before accessing the application.
-
-![Register](screenshots/register.png)
+![Home Page](screenshot/home.png)
 
 ---
 
